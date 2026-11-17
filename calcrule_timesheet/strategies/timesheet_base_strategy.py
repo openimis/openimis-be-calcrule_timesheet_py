@@ -40,6 +40,10 @@ class BaseTimesheetStrategy(TimesheetStrategyInterface):
             calculated_payment = cls._calculate_timesheet_payment(
                 enrollment, base_day_rate
             )
+            # No day worked (no entry, or 0% every day): nothing to pay, so no bill and
+            # no benefit, which would otherwise show up as a 0 row to reconcile.
+            if calculated_payment <= 0:
+                continue
 
             beneficiary = getattr(enrollment, cls.BENEFICIARY_FIELD)
             additional_params = {
