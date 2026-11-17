@@ -338,3 +338,60 @@ class TimesheetCalculationIntegrationTest(TestCase):
 
         self.assertEqual(result, "Calculation and transformation into bills completed successfully.")
         self.assertEqual(mock_bill_service.bill_create.call_count, 3)
+
+    @patch('calcrule_timesheet.strategies.timesheet_base_strategy.PayrollService')
+    @patch('calcrule_timesheet.strategies.timesheet_base_strategy.BenefitConsumptionService')
+    @patch('calcrule_timesheet.strategies.timesheet_base_strategy.BillService')
+    def test_zero_day_beneficiaries_get_no_benefit(
+        self, mock_bill_service, mock_benefit_service, mock_payroll_service
+    ):
+        """A beneficiary who worked no day (0% every day, or no entry) is not paid: no bill, no benefit"""
+        individuals = [
+            create_individual(self.user.username, payload_override={'first_name': f'Zero{i}'})
+            for i in range(3)
+        ]
+        worked, all_zero, no_entry = [
+            self.create_individual_beneficiary_with_enrollment(individual)
+            for individual in individuals
+        ]
+        create_multiple_time_entries(worked, [
+            {'day_number': 1, 'percent_complete': 100},
+            {'day_number': 2, 'percent_complete': 0},
+        ], self.user.username)
+        create_multiple_time_entries(all_zero, [
+            {'day_number': 1, 'percent_complete': 0},
+            {'day_number': 2, 'percent_complete': 0},
+        ], self.user.username)
+
+        mock_bill_service.bill_create.return_value = {'success': True, 'data': {'id': 123}}
+        mock_benefit_instance = MagicMock()
+        mock_benefit_instance.create.return_value = {'success': True, 'data': {'id': 456}}
+        mock_benefit_service.return_value = mock_benefit_instance
+
+        result_pp = PaymentPlanService(self.user).create({
+            'code': 'PP-INTG-ZERO-001',
+            'name': 'Integration Test Zero Day Payment Plan',
+            'calculation': str(self.calculation_rule.uuid),
+            'benefit_plan_id': str(self.benefit_plan_individual.id),
+            'benefit_plan_type': ContentType.objects.get_for_model(self.benefit_plan_individual),
+            'periodicity': 12,
+            'json_ext': {'calculation_rule': {'base_day_rate': '50.0'}},
+        })
+        self.assertTrue(result_pp.get('success', False))
+        payment_plan = PaymentPlan.objects.get(id=result_pp['data']['uuid'])
+
+        payment_cycle = Mock(start_date='2023-01-01', end_date='2023-12-31')
+        self.calculation_rule.calculate(
+            payment_plan,
+            user_id=self.user.id,
+            start_date='2023-01-01',
+            end_date='2023-12-31',
+            payment_cycle=payment_cycle,
+            payroll=Mock(id=778),
+        )
+
+        self.assertEqual(mock_bill_service.bill_create.call_count, 1)
+        bill = mock_bill_service.bill_create.call_args.kwargs['convert_results']['bill_data']
+        self.assertEqual(bill['subject_id'], f"{worked.beneficiary.id}")
+        self.assertEqual(bill['amount_net'], 50.0)
+        mock_benefit_instance.create.assert_called_once()
